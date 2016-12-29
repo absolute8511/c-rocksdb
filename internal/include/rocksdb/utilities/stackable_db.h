@@ -68,16 +68,12 @@ class StackableDB : public DB {
     return db_->MultiGet(options, column_family, keys, values);
   }
 
-  using DB::AddFile;
-  virtual Status AddFile(ColumnFamilyHandle* column_family,
-                         const std::vector<ExternalSstFileInfo>& file_info_list,
-                         bool move_file) override {
-    return db_->AddFile(column_family, file_info_list, move_file);
-  }
-  virtual Status AddFile(ColumnFamilyHandle* column_family,
-                         const std::vector<std::string>& file_path_list,
-                         bool move_file) override {
-    return db_->AddFile(column_family, file_path_list, move_file);
+  using DB::IngestExternalFile;
+  virtual Status IngestExternalFile(
+      ColumnFamilyHandle* column_family,
+      const std::vector<std::string>& external_files,
+      const IngestExternalFileOptions& options) override {
+    return db_->IngestExternalFile(column_family, external_files, options);
   }
 
   using DB::KeyMayExist;
@@ -219,13 +215,12 @@ class StackableDB : public DB {
   }
 
   using DB::GetOptions;
-  virtual const Options& GetOptions(ColumnFamilyHandle* column_family) const
-      override {
+  virtual Options GetOptions(ColumnFamilyHandle* column_family) const override {
     return db_->GetOptions(column_family);
   }
 
   using DB::GetDBOptions;
-  virtual const DBOptions& GetDBOptions() const override {
+  virtual DBOptions GetDBOptions() const override {
     return db_->GetDBOptions();
   }
 
@@ -288,6 +283,12 @@ class StackableDB : public DB {
                             const std::unordered_map<std::string, std::string>&
                                 new_options) override {
     return db_->SetOptions(column_family_handle, new_options);
+  }
+
+  virtual Status SetDBOptions(
+      const std::unordered_map<std::string, std::string>& new_options)
+      override {
+    return db_->SetDBOptions(new_options);
   }
 
   using DB::GetPropertiesOfAllTables;

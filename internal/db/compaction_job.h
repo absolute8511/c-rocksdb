@@ -25,6 +25,7 @@
 #include "db/job_context.h"
 #include "db/log_writer.h"
 #include "db/memtable_list.h"
+#include "db/range_del_aggregator.h"
 #include "db/version_edit.h"
 #include "db/write_controller.h"
 #include "db/write_thread.h"
@@ -37,6 +38,7 @@
 #include "rocksdb/transaction_log.h"
 #include "table/scoped_arena_iterator.h"
 #include "util/autovector.h"
+#include "util/db_options.h"
 #include "util/event_logger.h"
 #include "util/stop_watch.h"
 #include "util/thread_local.h"
@@ -52,7 +54,8 @@ class Arena;
 
 class CompactionJob {
  public:
-  CompactionJob(int job_id, Compaction* compaction, const DBOptions& db_options,
+  CompactionJob(int job_id, Compaction* compaction,
+                const ImmutableDBOptions& db_options,
                 const EnvOptions& env_options, VersionSet* versions,
                 std::atomic<bool>* shutting_down, LogBuffer* log_buffer,
                 Directory* db_directory, Directory* output_directory,
@@ -94,7 +97,9 @@ class CompactionJob {
   void ProcessKeyValueCompaction(SubcompactionState* sub_compact);
 
   Status FinishCompactionOutputFile(const Status& input_status,
-                                    SubcompactionState* sub_compact);
+                                    SubcompactionState* sub_compact,
+                                    RangeDelAggregator* range_del_agg = nullptr,
+                                    const Slice* next_table_min_key = nullptr);
   Status InstallCompactionResults(const MutableCFOptions& mutable_cf_options);
   void RecordCompactionIOStats();
   Status OpenCompactionOutputFile(SubcompactionState* sub_compact);
@@ -120,7 +125,7 @@ class CompactionJob {
 
   // DBImpl state
   const std::string& dbname_;
-  const DBOptions& db_options_;
+  const ImmutableDBOptions& db_options_;
   const EnvOptions& env_options_;
 
   Env* env_;
