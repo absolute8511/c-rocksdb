@@ -270,6 +270,9 @@ class BackupEngine {
   // the state will remain consistent. The state will be cleaned up
   // next time you create BackupableDB or RestoreBackupableDB.
   virtual void StopBackup() = 0;
+  // check the backup prepare status, if prepared we can 
+  // make sure there will be no more new write in this backup
+  virtual bool IsBackupPrepared() = 0;
 
   // Returns info about backups in backup_info
   virtual void GetBackupInfo(std::vector<BackupInfo>* backup_info) = 0;

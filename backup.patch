@@ -1,0 +1,178 @@
+diff --git a/internal/db/c.cc b/internal/db/c.cc
+index 89b392b..f1770db 100644
+--- a/internal/db/c.cc
++++ b/internal/db/c.cc
+@@ -435,7 +435,11 @@ rocksdb_backup_engine_t* rocksdb_backup_engine_open(
+     const rocksdb_options_t* options, const char* path, char** errptr) {
+   BackupEngine* be;
+   if (SaveError(errptr, BackupEngine::Open(options->rep.env,
+-                                           BackupableDBOptions(path), &be))) {
++                                           BackupableDBOptions(path,
++                                                               nullptr,
++                                                               true,
++                                                               options->rep.info_log.get()),
++                                           &be))) {
+     return nullptr;
+   }
+   rocksdb_backup_engine_t* result = new rocksdb_backup_engine_t;
+diff --git a/internal/db/db_impl.cc b/internal/db/db_impl.cc
+index 70127b1..a97ca76 100644
+--- a/internal/db/db_impl.cc
++++ b/internal/db/db_impl.cc
+@@ -5250,6 +5250,10 @@ Env* DBImpl::GetEnv() const {
+   return env_;
+ }
+ 
++Logger* DBImpl::GetInfoLogger() const {
++    return immutable_db_options_.info_log.get();
++}
++
+ Options DBImpl::GetOptions(ColumnFamilyHandle* column_family) const {
+   InstrumentedMutexLock l(&mutex_);
+   auto cfh = reinterpret_cast<ColumnFamilyHandleImpl*>(column_family);
+diff --git a/internal/db/db_impl.h b/internal/db/db_impl.h
+index a6a6f3f..2664103 100644
+--- a/internal/db/db_impl.h
++++ b/internal/db/db_impl.h
+@@ -177,6 +177,7 @@ class DBImpl : public DB {
+   virtual Status Flush(const FlushOptions& options,
+                        ColumnFamilyHandle* column_family) override;
+   virtual Status SyncWAL() override;
++  virtual Logger* GetInfoLogger() const override;
+ 
+   virtual SequenceNumber GetLatestSequenceNumber() const override;
+ 
+diff --git a/internal/include/rocksdb/db.h b/internal/include/rocksdb/db.h
+index 2832659..d75003a 100644
+--- a/internal/include/rocksdb/db.h
++++ b/internal/include/rocksdb/db.h
+@@ -709,6 +709,8 @@ class DB {
+     return Flush(options, DefaultColumnFamily());
+   }
+ 
++  virtual Logger* GetInfoLogger() const = 0;
++
+   // Sync the wal. Note that Write() followed by SyncWAL() is not exactly the
+   // same as Write() with sync=true: in the latter case the changes won't be
+   // visible until the sync is done.
+diff --git a/internal/include/rocksdb/utilities/backupable_db.h b/internal/include/rocksdb/utilities/backupable_db.h
+index 27c1b49..a943a2a 100644
+--- a/internal/include/rocksdb/utilities/backupable_db.h
++++ b/internal/include/rocksdb/utilities/backupable_db.h
+@@ -270,6 +270,9 @@ class BackupEngine {
+   // the state will remain consistent. The state will be cleaned up
+   // next time you create BackupableDB or RestoreBackupableDB.
+   virtual void StopBackup() = 0;
++  // check the backup prepare status, if prepared we can 
++  // make sure there will be no more new write in this backup
++  virtual bool IsBackupPrepared() = 0;
+ 
+   // Returns info about backups in backup_info
+   virtual void GetBackupInfo(std::vector<BackupInfo>* backup_info) = 0;
+diff --git a/internal/include/rocksdb/utilities/stackable_db.h b/internal/include/rocksdb/utilities/stackable_db.h
+index d223a76..ba52bbc 100644
+--- a/internal/include/rocksdb/utilities/stackable_db.h
++++ b/internal/include/rocksdb/utilities/stackable_db.h
+@@ -234,6 +234,10 @@ class StackableDB : public DB {
+     return db_->SyncWAL();
+   }
+ 
++  virtual Logger* GetInfoLogger() const override {
++      return db_->GetInfoLogger();
++  }
++
+ #ifndef ROCKSDB_LITE
+ 
+   virtual Status DisableFileDeletions() override {
+diff --git a/internal/utilities/backupable/backupable_db.cc b/internal/utilities/backupable/backupable_db.cc
+index fb2a68b..b883746 100644
+--- a/internal/utilities/backupable/backupable_db.cc
++++ b/internal/utilities/backupable/backupable_db.cc
+@@ -97,6 +97,9 @@ class BackupEngineImpl : public BackupEngine {
+   void StopBackup() override {
+     stop_backup_.store(true, std::memory_order_release);
+   }
++  bool IsBackupPrepared() override {
++    return prepared_backup_.load(std::memory_order_acquire);
++  }
+   Status GarbageCollect() override;
+ 
+   // The returned BackupInfos are in chronological order, which means the
+@@ -458,6 +461,7 @@ class BackupEngineImpl : public BackupEngine {
+   std::unordered_map<std::string,
+                      std::shared_ptr<FileInfo>> backuped_file_infos_;
+   std::atomic<bool> stop_backup_;
++  std::atomic<bool> prepared_backup_;
+ 
+   // options data
+   BackupableDBOptions options_;
+@@ -495,6 +499,7 @@ BackupEngineImpl::BackupEngineImpl(Env* db_env,
+                                    bool read_only)
+     : initialized_(false),
+       stop_backup_(false),
++      prepared_backup_(false),
+       options_(options),
+       db_env_(db_env),
+       backup_env_(options.backup_env != nullptr ? options.backup_env : db_env_),
+@@ -672,6 +677,9 @@ Status BackupEngineImpl::CreateNewBackupWithMetadata(
+   if (app_metadata.size() > kMaxAppMetaSize) {
+     return Status::InvalidArgument("App metadata too large");
+   }
++  if (options_.info_log == nullptr) {
++    options_.info_log = db->GetInfoLogger();
++  }
+   Status s;
+   std::vector<std::string> live_files;
+   VectorLogPtr live_wal_files;
+@@ -713,6 +721,7 @@ Status BackupEngineImpl::CreateNewBackupWithMetadata(
+   Log(options_.info_log, "Started the backup process -- creating backup %u",
+       new_backup_id);
+ 
++  prepared_backup_.store(true, std::memory_order_release);
+   // create temporary private dir
+   s = backup_env_->CreateDir(
+       GetAbsolutePath(GetPrivateFileRel(new_backup_id, true)));
+@@ -786,35 +795,27 @@ Status BackupEngineImpl::CreateNewBackupWithMetadata(
+         progress_callback, manifest_fname.substr(1) + "\n");
+   }
+ 
+-  // Pre-fetch sizes for WAL files
+-  std::unordered_map<std::string, uint64_t> wal_path_to_size;
+-  if (s.ok()) {
+-    if (db->GetOptions().wal_dir != "") {
+-      s = InsertPathnameToSizeBytes(db->GetOptions().wal_dir, db_env_,
+-                                    &wal_path_to_size);
+-    } else {
+-      wal_path_to_size = std::move(data_path_to_size);
+-    }
+-  }
++  Log(options_.info_log, "begin add wal files for backup -- %lu",
++      live_wal_files.size());
+ 
+   // Add a CopyOrCreateWorkItem to the channel for each WAL file
+   for (size_t i = 0; s.ok() && i < live_wal_files.size(); ++i) {
+-    auto wal_path_to_size_iter =
+-        wal_path_to_size.find(live_wal_files[i]->PathName());
+-    uint64_t size_bytes = wal_path_to_size_iter == wal_path_to_size.end()
+-                              ? port::kMaxUint64
+-                              : wal_path_to_size_iter->second;
++    uint64_t size_bytes = live_wal_files[i]->SizeFileBytes();
+     if (live_wal_files[i]->Type() == kAliveLogFile) {
++      Log(options_.info_log, "add wal file for backup %s -- %llu",
++          live_wal_files[i]->PathName().c_str(), size_bytes);
+       // we only care about live log files
+       // copy the file into backup_dir/files/<new backup>/
+       s = AddBackupFileWorkItem(live_dst_paths, backup_items_to_finish,
+                                 new_backup_id, false, /* not shared */
+                                 db->GetOptions().wal_dir,
+                                 live_wal_files[i]->PathName(), rate_limiter,
+-                                size_bytes);
++                                size_bytes, size_bytes);
+     }
+   }
+ 
++  Log(options_.info_log, "add files for backup done, wait finish.");
++
+   Status item_status;
+   for (auto& item : backup_items_to_finish) {
+     item.result.wait();

@@ -5250,6 +5250,10 @@ Env* DBImpl::GetEnv() const {
   return env_;
 }
 
+Logger* DBImpl::GetInfoLogger() const {
+    return immutable_db_options_.info_log.get();
+}
+
 Options DBImpl::GetOptions(ColumnFamilyHandle* column_family) const {
   InstrumentedMutexLock l(&mutex_);
   auto cfh = reinterpret_cast<ColumnFamilyHandleImpl*>(column_family);

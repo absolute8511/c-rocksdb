@@ -97,6 +97,9 @@ class BackupEngineImpl : public BackupEngine {
   void StopBackup() override {
     stop_backup_.store(true, std::memory_order_release);
   }
+  bool IsBackupPrepared() override {
+    return prepared_backup_.load(std::memory_order_acquire);
+  }
   Status GarbageCollect() override;
 
   // The returned BackupInfos are in chronological order, which means the
@@ -458,6 +461,7 @@ class BackupEngineImpl : public BackupEngine {
   std::unordered_map<std::string,
                      std::shared_ptr<FileInfo>> backuped_file_infos_;
   std::atomic<bool> stop_backup_;
+  std::atomic<bool> prepared_backup_;
 
   // options data
   BackupableDBOptions options_;
@@ -495,6 +499,7 @@ BackupEngineImpl::BackupEngineImpl(Env* db_env,
                                    bool read_only)
     : initialized_(false),
       stop_backup_(false),
+      prepared_backup_(false),
       options_(options),
       db_env_(db_env),
       backup_env_(options.backup_env != nullptr ? options.backup_env : db_env_),
@@ -672,6 +677,9 @@ Status BackupEngineImpl::CreateNewBackupWithMetadata(
   if (app_metadata.size() > kMaxAppMetaSize) {
     return Status::InvalidArgument("App metadata too large");
   }
+  if (options_.info_log == nullptr) {
+    options_.info_log = db->GetInfoLogger();
+  }
   Status s;
   std::vector<std::string> live_files;
   VectorLogPtr live_wal_files;
@@ -713,6 +721,7 @@ Status BackupEngineImpl::CreateNewBackupWithMetadata(
   Log(options_.info_log, "Started the backup process -- creating backup %u",
       new_backup_id);
 
+  prepared_backup_.store(true, std::memory_order_release);
   // create temporary private dir
   s = backup_env_->CreateDir(
       GetAbsolutePath(GetPrivateFileRel(new_backup_id, true)));
@@ -786,34 +795,26 @@ Status BackupEngineImpl::CreateNewBackupWithMetadata(
         progress_callback, manifest_fname.substr(1) + "\n");
   }
 
-  // Pre-fetch sizes for WAL files
-  std::unordered_map<std::string, uint64_t> wal_path_to_size;
-  if (s.ok()) {
-    if (db->GetOptions().wal_dir != "") {
-      s = InsertPathnameToSizeBytes(db->GetOptions().wal_dir, db_env_,
-                                    &wal_path_to_size);
-    } else {
-      wal_path_to_size = std::move(data_path_to_size);
-    }
-  }
+  Log(options_.info_log, "begin add wal files for backup -- %lu",
+      live_wal_files.size());
 
   // Add a CopyOrCreateWorkItem to the channel for each WAL file
   for (size_t i = 0; s.ok() && i < live_wal_files.size(); ++i) {
-    auto wal_path_to_size_iter =
-        wal_path_to_size.find(live_wal_files[i]->PathName());
-    uint64_t size_bytes = wal_path_to_size_iter == wal_path_to_size.end()
-                              ? port::kMaxUint64
-                              : wal_path_to_size_iter->second;
+    uint64_t size_bytes = live_wal_files[i]->SizeFileBytes();
     if (live_wal_files[i]->Type() == kAliveLogFile) {
+      Log(options_.info_log, "add wal file for backup %s -- %llu",
+          live_wal_files[i]->PathName().c_str(), size_bytes);
       // we only care about live log files
       // copy the file into backup_dir/files/<new backup>/
       s = AddBackupFileWorkItem(live_dst_paths, backup_items_to_finish,
                                 new_backup_id, false, /* not shared */
                                 db->GetOptions().wal_dir,
                                 live_wal_files[i]->PathName(), rate_limiter,
-                                size_bytes);
+                                size_bytes, size_bytes);
     }
   }
+
+  Log(options_.info_log, "add files for backup done, wait finish.");
 
   Status item_status;
   for (auto& item : backup_items_to_finish) {

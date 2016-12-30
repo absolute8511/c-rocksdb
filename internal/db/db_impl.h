@@ -177,6 +177,7 @@ class DBImpl : public DB {
   virtual Status Flush(const FlushOptions& options,
                        ColumnFamilyHandle* column_family) override;
   virtual Status SyncWAL() override;
+  virtual Logger* GetInfoLogger() const override;
 
   virtual SequenceNumber GetLatestSequenceNumber() const override;
 

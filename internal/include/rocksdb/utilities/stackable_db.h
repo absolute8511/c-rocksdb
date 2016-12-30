@@ -234,6 +234,10 @@ class StackableDB : public DB {
     return db_->SyncWAL();
   }
 
+  virtual Logger* GetInfoLogger() const override {
+      return db_->GetInfoLogger();
+  }
+
 #ifndef ROCKSDB_LITE
 
   virtual Status DisableFileDeletions() override {
