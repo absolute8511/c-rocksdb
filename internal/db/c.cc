@@ -31,6 +31,7 @@
 #include "rocksdb/slice_transform.h"
 #include "rocksdb/table.h"
 #include "rocksdb/utilities/backupable_db.h"
+#include "rocksdb/utilities/checkpoint.h"
 #include "utilities/merge_operators.h"
 
 using rocksdb::Cache;
@@ -78,6 +79,7 @@ using rocksdb::BackupableDBOptions;
 using rocksdb::BackupInfo;
 using rocksdb::RestoreOptions;
 using rocksdb::CompactRangeOptions;
+using rocksdb::Checkpoint;
 
 using std::shared_ptr;
 
@@ -87,6 +89,7 @@ struct rocksdb_t                 { DB*               rep; };
 struct rocksdb_backup_engine_t   { BackupEngine*     rep; };
 struct rocksdb_backup_engine_info_t { std::vector<BackupInfo> rep; };
 struct rocksdb_restore_options_t { RestoreOptions rep; };
+struct rocksdb_checkpoint_t {Checkpoint* rep; };
 struct rocksdb_iterator_t        { Iterator*         rep; };
 struct rocksdb_writebatch_t      { WriteBatch        rep; };
 struct rocksdb_snapshot_t        { const Snapshot*   rep; };
@@ -518,6 +521,25 @@ void rocksdb_backup_engine_info_destroy(
 void rocksdb_backup_engine_close(rocksdb_backup_engine_t* be) {
   delete be->rep;
   delete be;
+}
+
+rocksdb_checkpoint_t* rocksdb_create_checkpoint(rocksdb_t* db, char** errptr) {
+    Checkpoint* checkpoint;
+    if (SaveError(errptr, Checkpoint::Create(db->rep, &checkpoint))) {
+        return nullptr;
+    }
+    rocksdb_checkpoint_t* result = new rocksdb_checkpoint_t;
+    result->rep = checkpoint;
+    return result;
+}
+
+void rocksdb_checkpoint_open(rocksdb_checkpoint_t* checkpoint, const char* checkpoint_dir,
+    char** errptr) {
+    SaveError(errptr, checkpoint->rep->CreateCheckpoint(std::string(checkpoint_dir)));
+}
+
+void rocksdb_destroy_checkpoint(rocksdb_checkpoint_t* checkpoint) {
+    delete checkpoint->rep;
 }
 
 void rocksdb_close(rocksdb_t* db) {

@@ -74,6 +74,7 @@ typedef struct rocksdb_t                 rocksdb_t;
 typedef struct rocksdb_backup_engine_t   rocksdb_backup_engine_t;
 typedef struct rocksdb_backup_engine_info_t   rocksdb_backup_engine_info_t;
 typedef struct rocksdb_restore_options_t rocksdb_restore_options_t;
+typedef struct rocksdb_checkpoint_t rocksdb_checkpoint_t;
 typedef struct rocksdb_cache_t           rocksdb_cache_t;
 typedef struct rocksdb_compactionfilter_t rocksdb_compactionfilter_t;
 typedef struct rocksdb_compactionfiltercontext_t
@@ -162,6 +163,14 @@ extern ROCKSDB_LIBRARY_API void rocksdb_backup_engine_info_destroy(
 
 extern ROCKSDB_LIBRARY_API void rocksdb_backup_engine_close(
     rocksdb_backup_engine_t* be);
+
+extern ROCKSDB_LIBRARY_API rocksdb_checkpoint_t* rocksdb_create_checkpoint(
+    rocksdb_t* db, char** errptr);
+extern ROCKSDB_LIBRARY_API void rocksdb_checkpoint_open (
+    rocksdb_checkpoint_t* checkpoint,
+    const char* checkpoint_dir, char **errptr);
+extern ROCKSDB_LIBRARY_API void rocksdb_destroy_checkpoint(
+    rocksdb_checkpoint_t* checkpoint);
 
 extern ROCKSDB_LIBRARY_API rocksdb_t* rocksdb_open_column_families(
     const rocksdb_options_t* options, const char* name, int num_column_families,
