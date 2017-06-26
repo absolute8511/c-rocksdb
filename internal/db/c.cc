@@ -1047,6 +1047,10 @@ void rocksdb_iter_seek(rocksdb_iterator_t* iter, const char* k, size_t klen) {
   iter->rep->Seek(Slice(k, klen));
 }
 
+void rocksdb_iter_seek_for_prev(rocksdb_iterator_t* iter, const char* k, size_t klen) {
+  iter->rep->SeekForPrev(Slice(k, klen));
+}
+
 void rocksdb_iter_next(rocksdb_iterator_t* iter) {
   iter->rep->Next();
 }
@@ -2180,6 +2184,14 @@ void rocksdb_cache_destroy(rocksdb_cache_t* cache) {
 
 void rocksdb_cache_set_capacity(rocksdb_cache_t* cache, size_t capacity) {
   cache->rep->SetCapacity(capacity);
+}
+
+size_t rocksdb_cache_get_usage(rocksdb_cache_t* cache) {
+  return cache->rep->GetUsage();
+}
+
+size_t rocksdb_cache_get_pinned_usage(rocksdb_cache_t* cache) {
+  return cache->rep->GetPinnedUsage();
 }
 
 rocksdb_env_t* rocksdb_create_default_env() {
