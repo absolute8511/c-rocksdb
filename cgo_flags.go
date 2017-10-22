@@ -4,7 +4,7 @@
 package rocksdb
 
 // #cgo CPPFLAGS: -Iinternal -Iinternal/include -Iinternal/db -Iinternal/util -I/usr/local/include
-// #cgo CPPFLAGS: -Iinternal/utilities/merge_operators/string_append
+// #cgo CPPFLAGS: -Iinternal/utilities/merge_operators/string_append -Iinternal/utilities/merge_operators/cassandra -Iinternal/third-party/gtest-1.7.0/fused-src
 // #cgo windows CPPFLAGS: -DOS_WIN
 // #cgo !windows CPPFLAGS: -DROCKSDB_PLATFORM_POSIX -DROCKSDB_LIB_IO_POSIX
 // #cgo darwin CPPFLAGS: -DOS_MACOSX
