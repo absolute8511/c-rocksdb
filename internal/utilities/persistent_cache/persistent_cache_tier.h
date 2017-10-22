@@ -1,7 +1,7 @@
 //  Copyright (c) 2013, Facebook, Inc.  All rights reserved.
-//  This source code is licensed under the BSD-style license found in the
-//  LICENSE file in the root directory of this source tree. An additional grant
-//  of patent rights can be found in the PATENTS file in the same directory.
+//  This source code is licensed under both the GPLv2 (found in the
+//  COPYING file in the root directory) and Apache 2.0 License
+//  (found in the LICENSE.Apache file in the root directory).
 //
 #pragma once
 
@@ -13,10 +13,10 @@
 #include <string>
 #include <vector>
 
+#include "monitoring/histogram.h"
 #include "rocksdb/env.h"
 #include "rocksdb/persistent_cache.h"
 #include "rocksdb/status.h"
-#include "util/histogram.h"
 
 // Persistent Cache
 //
@@ -220,6 +220,8 @@ struct PersistentCacheConfig {
   PersistentCacheConfig MakePersistentCacheConfig(
       const std::string& path, const uint64_t size,
       const std::shared_ptr<Logger>& log);
+
+  std::string ToString() const;
 };
 
 // Persistent Cache Tier
@@ -231,7 +233,6 @@ struct PersistentCacheConfig {
 class PersistentCacheTier : public PersistentCache {
  public:
   typedef std::shared_ptr<PersistentCacheTier> Tier;
-  typedef std::map<std::string, double> TierStats;
 
   virtual ~PersistentCacheTier() {}
 
@@ -250,8 +251,7 @@ class PersistentCacheTier : public PersistentCache {
   // Print stats to string recursively
   virtual std::string PrintStats();
 
-  // Expose stats
-  virtual std::vector<TierStats> Stats();
+  virtual PersistentCache::StatsType Stats();
 
   // Insert to page cache
   virtual Status Insert(const Slice& page_key, const char* data,
@@ -263,6 +263,8 @@ class PersistentCacheTier : public PersistentCache {
 
   // Does it store compressed data ?
   virtual bool IsCompressed() = 0;
+
+  virtual std::string GetPrintableOptions() const = 0;
 
   // Return a reference to next tier
   virtual Tier& next_tier() { return next_tier_; }
@@ -296,12 +298,16 @@ class PersistentTieredCache : public PersistentCacheTier {
   Status Close() override;
   bool Erase(const Slice& key) override;
   std::string PrintStats() override;
-  std::vector<TierStats> Stats() override;
+  PersistentCache::StatsType Stats() override;
   Status Insert(const Slice& page_key, const char* data,
                 const size_t size) override;
   Status Lookup(const Slice& page_key, std::unique_ptr<char[]>* data,
                 size_t* size) override;
   bool IsCompressed() override;
+
+  std::string GetPrintableOptions() const override {
+    return "PersistentTieredCache";
+  }
 
   void AddTier(const Tier& tier);
 

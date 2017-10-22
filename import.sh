@@ -32,7 +32,8 @@ set -eu
 
 rm -rf internal/*
 find . -type l -not -path './.git/*' | xargs rm
-curl -sL https://github.com/facebook/rocksdb/archive/v4.13.5.tar.gz | tar zxf - -C internal --strip-components=1
+
+curl -sL https://github.com/facebook/rocksdb/archive/v5.7.3.tar.gz | tar zxf - -C internal --strip-components=1
 make -C internal util/build_version.cc
 # Downcase some windows-only includes for compatibility with mingw64.
 grep -lRF '<Windows.h>' internal | xargs sed -i~ 's!<Windows.h>!<windows.h>!g'

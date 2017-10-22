@@ -1,7 +1,7 @@
 //  Copyright (c) 2011-present, Facebook, Inc.  All rights reserved.
-//  This source code is licensed under the BSD-style license found in the
-//  LICENSE file in the root directory of this source tree. An additional grant
-//  of patent rights can be found in the PATENTS file in the same directory.
+//  This source code is licensed under both the GPLv2 (found in the
+//  COPYING file in the root directory) and Apache 2.0 License
+//  (found in the LICENSE.Apache file in the root directory).
 
 #pragma once
 #ifndef ROCKSDB_LITE
@@ -12,8 +12,10 @@
 #include <utility>
 #include <vector>
 
+#include "monitoring/instrumented_mutex.h"
 #include "rocksdb/utilities/transaction.h"
-#include "util/instrumented_mutex.h"
+#include "util/autovector.h"
+#include "util/hash_map.h"
 #include "util/thread_local.h"
 #include "utilities/transactions/transaction_impl.h"
 
@@ -46,7 +48,7 @@ class TransactionLockMgr {
   // Attempt to lock key.  If OK status is returned, the caller is responsible
   // for calling UnLock() on this key.
   Status TryLock(TransactionImpl* txn, uint32_t column_family_id,
-                 const std::string& key, Env* env);
+                 const std::string& key, Env* env, bool exclusive);
 
   // Unlock a key locked by TryLock().  txn must be the same Transaction that
   // locked this key.
@@ -88,14 +90,15 @@ class TransactionLockMgr {
   std::mutex wait_txn_map_mutex_;
 
   // Maps from waitee -> number of waiters.
-  std::unordered_map<TransactionID, int> rev_wait_txn_map_;
+  HashMap<TransactionID, int> rev_wait_txn_map_;
   // Maps from waiter -> waitee.
-  std::unordered_map<TransactionID, TransactionID> wait_txn_map_;
+  HashMap<TransactionID, autovector<TransactionID>> wait_txn_map_;
 
   // Used to allocate mutexes/condvars to use when locking keys
   std::shared_ptr<TransactionDBMutexFactory> mutex_factory_;
 
-  bool IsLockExpired(const LockInfo& lock_info, Env* env, uint64_t* wait_time);
+  bool IsLockExpired(TransactionID txn_id, const LockInfo& lock_info, Env* env,
+                     uint64_t* wait_time);
 
   std::shared_ptr<LockMap> GetLockMap(uint32_t column_family_id);
 
@@ -107,11 +110,17 @@ class TransactionLockMgr {
   Status AcquireLocked(LockMap* lock_map, LockMapStripe* stripe,
                        const std::string& key, Env* env,
                        const LockInfo& lock_info, uint64_t* wait_time,
-                       TransactionID* txn_id);
+                       autovector<TransactionID>* txn_ids);
 
-  bool IncrementWaiters(const TransactionImpl* txn, TransactionID wait_id);
-  void DecrementWaiters(const TransactionImpl* txn, TransactionID wait_id);
-  void DecrementWaitersImpl(const TransactionImpl* txn, TransactionID wait_id);
+  void UnLockKey(const TransactionImpl* txn, const std::string& key,
+                 LockMapStripe* stripe, LockMap* lock_map, Env* env);
+
+  bool IncrementWaiters(const TransactionImpl* txn,
+                        const autovector<TransactionID>& wait_ids);
+  void DecrementWaiters(const TransactionImpl* txn,
+                        const autovector<TransactionID>& wait_ids);
+  void DecrementWaitersImpl(const TransactionImpl* txn,
+                            const autovector<TransactionID>& wait_ids);
 
   // No copying allowed
   TransactionLockMgr(const TransactionLockMgr&);

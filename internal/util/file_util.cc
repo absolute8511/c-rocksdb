@@ -1,7 +1,7 @@
 //  Copyright (c) 2011-present, Facebook, Inc.  All rights reserved.
-//  This source code is licensed under the BSD-style license found in the
-//  LICENSE file in the root directory of this source tree. An additional grant
-//  of patent rights can be found in the PATENTS file in the same directory.
+//  This source code is licensed under both the GPLv2 (found in the
+//  COPYING file in the root directory) and Apache 2.0 License
+//  (found in the LICENSE.Apache file in the root directory).
 //
 #include "util/file_util.h"
 
@@ -16,7 +16,7 @@ namespace rocksdb {
 
 // Utility function to copy a file up to a specified length
 Status CopyFile(Env* env, const std::string& source,
-                const std::string& destination, uint64_t size) {
+                const std::string& destination, uint64_t size, bool use_fsync) {
   const EnvOptions soptions;
   Status s;
   unique_ptr<SequentialFileReader> src_reader;
@@ -62,6 +62,7 @@ Status CopyFile(Env* env, const std::string& source,
     }
     size -= slice.size();
   }
+  dest_writer->Sync(use_fsync);
   return Status::OK();
 }
 
@@ -84,6 +85,7 @@ Status CreateFile(Env* env, const std::string& destination,
 Status DeleteSSTFile(const ImmutableDBOptions* db_options,
                      const std::string& fname, uint32_t path_id) {
   // TODO(tec): support sst_file_manager for multiple path_ids
+#ifndef ROCKSDB_LITE
   auto sfm =
       static_cast<SstFileManagerImpl*>(db_options->sst_file_manager.get());
   if (sfm && path_id == 0) {
@@ -91,6 +93,10 @@ Status DeleteSSTFile(const ImmutableDBOptions* db_options,
   } else {
     return db_options->env->DeleteFile(fname);
   }
+#else
+  // SstFileManager is not supported in ROCKSDB_LITE
+  return db_options->env->DeleteFile(fname);
+#endif
 }
 
 }  // namespace rocksdb

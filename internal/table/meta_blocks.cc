@@ -1,7 +1,7 @@
 //  Copyright (c) 2011-present, Facebook, Inc.  All rights reserved.
-//  This source code is licensed under the BSD-style license found in the
-//  LICENSE file in the root directory of this source tree. An additional grant
-//  of patent rights can be found in the PATENTS file in the same directory.
+//  This source code is licensed under both the GPLv2 (found in the
+//  COPYING file in the root directory) and Apache 2.0 License
+//  (found in the LICENSE.Apache file in the root directory).
 #include "table/meta_blocks.h"
 
 #include <map>
@@ -65,12 +65,17 @@ void PropertyBlockBuilder::AddTableProperty(const TableProperties& props) {
   Add(TablePropertiesNames::kRawValueSize, props.raw_value_size);
   Add(TablePropertiesNames::kDataSize, props.data_size);
   Add(TablePropertiesNames::kIndexSize, props.index_size);
+  if (props.index_partitions != 0) {
+    Add(TablePropertiesNames::kIndexPartitions, props.index_partitions);
+    Add(TablePropertiesNames::kTopLevelIndexSize, props.top_level_index_size);
+  }
   Add(TablePropertiesNames::kNumEntries, props.num_entries);
   Add(TablePropertiesNames::kNumDataBlocks, props.num_data_blocks);
   Add(TablePropertiesNames::kFilterSize, props.filter_size);
   Add(TablePropertiesNames::kFormatVersion, props.format_version);
   Add(TablePropertiesNames::kFixedKeyLen, props.fixed_key_len);
   Add(TablePropertiesNames::kColumnFamilyId, props.column_family_id);
+  Add(TablePropertiesNames::kCreationTime, props.creation_time);
 
   if (!props.filter_policy_name.empty()) {
     Add(TablePropertiesNames::kFilterPolicy, props.filter_policy_name);
@@ -114,7 +119,7 @@ void LogPropertiesCollectionError(
   std::string msg =
     "Encountered error when calling TablePropertiesCollector::" +
     method + "() with collector name: " + name;
-  Log(InfoLogLevel::ERROR_LEVEL, info_log, "%s", msg.c_str());
+  ROCKS_LOG_ERROR(info_log, "%s", msg.c_str());
 }
 
 bool NotifyCollectTableCollectorsOnAdd(
@@ -185,6 +190,10 @@ Status ReadProperties(const Slice& handle_value, RandomAccessFileReader* file,
   std::unordered_map<std::string, uint64_t*> predefined_uint64_properties = {
       {TablePropertiesNames::kDataSize, &new_table_properties->data_size},
       {TablePropertiesNames::kIndexSize, &new_table_properties->index_size},
+      {TablePropertiesNames::kIndexPartitions,
+       &new_table_properties->index_partitions},
+      {TablePropertiesNames::kTopLevelIndexSize,
+       &new_table_properties->top_level_index_size},
       {TablePropertiesNames::kFilterSize, &new_table_properties->filter_size},
       {TablePropertiesNames::kRawKeySize, &new_table_properties->raw_key_size},
       {TablePropertiesNames::kRawValueSize,
@@ -198,6 +207,8 @@ Status ReadProperties(const Slice& handle_value, RandomAccessFileReader* file,
        &new_table_properties->fixed_key_len},
       {TablePropertiesNames::kColumnFamilyId,
        &new_table_properties->column_family_id},
+      {TablePropertiesNames::kCreationTime,
+       &new_table_properties->creation_time},
   };
 
   std::string last_key;
@@ -227,8 +238,7 @@ Status ReadProperties(const Slice& handle_value, RandomAccessFileReader* file,
         auto error_msg =
           "Detect malformed value in properties meta-block:"
           "\tkey: " + key + "\tval: " + raw_val.ToString();
-        Log(InfoLogLevel::ERROR_LEVEL, ioptions.info_log, "%s",
-        error_msg.c_str());
+        ROCKS_LOG_ERROR(ioptions.info_log, "%s", error_msg.c_str());
         continue;
       }
       *(pos->second) = val;

@@ -1,7 +1,7 @@
 //  Copyright (c) 2011-present, Facebook, Inc.  All rights reserved.
-//  This source code is licensed under the BSD-style license found in the
-//  LICENSE file in the root directory of this source tree. An additional grant
-//  of patent rights can be found in the PATENTS file in the same directory.
+//  This source code is licensed under both the GPLv2 (found in the
+//  COPYING file in the root directory) and Apache 2.0 License
+//  (found in the LICENSE.Apache file in the root directory).
 //
 // Copyright (c) 2011 The LevelDB Authors. All rights reserved.
 // Use of this source code is governed by a BSD-style license that can be
@@ -16,6 +16,7 @@
 #include <inttypes.h>
 #include <algorithm>
 #include <atomic>
+#include <functional>
 #include <set>
 #include <thread>
 #include <unordered_map>
@@ -27,6 +28,7 @@
 #include "db/internal_stats.h"
 #include "db/table_cache.h"
 #include "db/version_set.h"
+#include "port/port.h"
 #include "table/table_reader.h"
 
 namespace rocksdb {
@@ -358,7 +360,7 @@ class VersionBuilder::Rep {
     if (max_threads <= 1) {
       load_handlers_func();
     } else {
-      std::vector<std::thread> threads;
+      std::vector<port::Thread> threads;
       for (int i = 0; i < max_threads; i++) {
         threads.emplace_back(load_handlers_func);
       }

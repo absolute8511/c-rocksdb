@@ -1,7 +1,7 @@
 //  Copyright (c) 2011-present, Facebook, Inc.  All rights reserved.
-//  This source code is licensed under the BSD-style license found in the
-//  LICENSE file in the root directory of this source tree. An additional grant
-//  of patent rights can be found in the PATENTS file in the same directory.
+//  This source code is licensed under both the GPLv2 (found in the
+//  COPYING file in the root directory) and Apache 2.0 License
+//  (found in the LICENSE.Apache file in the root directory).
 //
 // Copyright (c) 2011 The LevelDB Authors. All rights reserved.
 // Use of this source code is governed by a BSD-style license that can be
@@ -116,7 +116,7 @@ class DelayFilterFactory : public CompactionFilterFactory {
 };
 }  // namespace
 
-// Make sure we don't trigger a problem if the trigger conditon is given
+// Make sure we don't trigger a problem if the trigger condtion is given
 // to be 0, which is invalid.
 TEST_P(DBTestUniversalCompaction, UniversalCompactionSingleSortedRun) {
   Options options = CurrentOptions();
@@ -1028,13 +1028,15 @@ TEST_P(DBTestUniversalCompaction, UniversalCompactionTrivialMoveTest1) {
 // Test that checks trivial move in universal compaction
 TEST_P(DBTestUniversalCompaction, UniversalCompactionTrivialMoveTest2) {
   int32_t trivial_move = 0;
-  int32_t non_trivial_move = 0;
   rocksdb::SyncPoint::GetInstance()->SetCallBack(
       "DBImpl::BackgroundCompaction:TrivialMove",
       [&](void* arg) { trivial_move++; });
   rocksdb::SyncPoint::GetInstance()->SetCallBack(
-      "DBImpl::BackgroundCompaction:NonTrivial",
-      [&](void* arg) { non_trivial_move++; });
+      "DBImpl::BackgroundCompaction:NonTrivial", [&](void* arg) {
+        ASSERT_TRUE(arg != nullptr);
+        int output_level = *(static_cast<int*>(arg));
+        ASSERT_EQ(output_level, 0);
+      });
 
   rocksdb::SyncPoint::GetInstance()->EnableProcessing();
 
@@ -1044,7 +1046,7 @@ TEST_P(DBTestUniversalCompaction, UniversalCompactionTrivialMoveTest2) {
   options.num_levels = 15;
   options.write_buffer_size = 100 << 10;  // 100KB
   options.level0_file_num_compaction_trigger = 8;
-  options.max_background_compactions = 4;
+  options.max_background_compactions = 2;
   options.target_file_size_base = 64 * 1024;
   DestroyAndReopen(options);
   CreateAndReopenWithCF({"pikachu"}, options);
@@ -1065,7 +1067,6 @@ TEST_P(DBTestUniversalCompaction, UniversalCompactionTrivialMoveTest2) {
   dbfull()->TEST_WaitForCompact();
 
   ASSERT_GT(trivial_move, 0);
-  ASSERT_EQ(non_trivial_move, 0);
 
   rocksdb::SyncPoint::GetInstance()->DisableProcessing();
 }

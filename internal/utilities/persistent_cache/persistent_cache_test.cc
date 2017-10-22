@@ -1,7 +1,7 @@
 //  Copyright (c) 2013, Facebook, Inc.  All rights reserved.
-//  This source code is licensed under the BSD-style license found in the
-//  LICENSE file in the root directory of this source tree. An additional grant
-//  of patent rights can be found in the PATENTS file in the same directory.
+//  This source code is licensed under both the GPLv2 (found in the
+//  COPYING file in the root directory) and Apache 2.0 License
+//  (found in the LICENSE.Apache file in the root directory).
 //
 // Copyright (c) 2011 The LevelDB Authors. All rights reserved.
 // Use of this source code is governed by a BSD-style license that can be
@@ -37,6 +37,32 @@ static void OnOpenForWrite(void* arg) {
       std::bind(OnOpenForWrite, std::placeholders::_1));
 }
 #endif
+
+static void RemoveDirectory(const std::string& folder) {
+  std::vector<std::string> files;
+  Status status = Env::Default()->GetChildren(folder, &files);
+  if (!status.ok()) {
+    // we assume the directory does not exist
+    return;
+  }
+
+  // cleanup files with the patter :digi:.rc
+  for (auto file : files) {
+    if (file == "." || file == "..") {
+      continue;
+    }
+    status = Env::Default()->DeleteFile(folder + "/" + file);
+    assert(status.ok());
+  }
+
+  status = Env::Default()->DeleteDir(folder);
+  assert(status.ok());
+}
+
+static void OnDeleteDir(void* arg) {
+  char* dir = static_cast<char*>(arg);
+  RemoveDirectory(std::string(dir));
+}
 
 //
 // Simple logger that prints message on stdout
@@ -114,6 +140,21 @@ PersistentCacheTierTest::PersistentCacheTierTest()
   rocksdb::SyncPoint::GetInstance()->SetCallBack("NewWritableFile:O_DIRECT",
                                                  OnOpenForWrite);
 #endif
+}
+
+// Block cache tests
+TEST_F(PersistentCacheTierTest, DISABLED_BlockCacheInsertWithFileCreateError) {
+  cache_ = NewBlockCache(Env::Default(), path_,
+                         /*size=*/std::numeric_limits<uint64_t>::max(),
+                         /*direct_writes=*/ false);
+  rocksdb::SyncPoint::GetInstance()->SetCallBack( 
+    "BlockCacheTier::NewCacheFile:DeleteDir", OnDeleteDir);
+
+  RunNegativeInsertTest(/*nthreads=*/ 1,
+                        /*max_keys*/
+                          static_cast<size_t>(10 * 1024 * kStressFactor));
+
+  rocksdb::SyncPoint::GetInstance()->ClearAllCallBacks();
 }
 
 #ifdef TRAVIS
@@ -244,6 +285,8 @@ TEST_F(PersistentCacheTierTest, FactoryTest) {
                                  /*size=*/1 * 1024 * 1024 * 1024, log, nvm_opt,
                                  &cache));
     ASSERT_TRUE(cache);
+    ASSERT_EQ(cache->Stats().size(), 1);
+    ASSERT_TRUE(cache->Stats()[0].size());
     cache.reset();
   }
 }
@@ -281,14 +324,14 @@ void PersistentCacheDBTest::RunTest(
     BlockBasedTableOptions table_options;
     table_options.cache_index_and_filter_blocks = true;
 
-    const uint64_t uint64_max = std::numeric_limits<uint64_t>::max();
+    const size_t size_max = std::numeric_limits<size_t>::max();
 
     switch (iter) {
       case 0:
         // page cache, block cache, no-compressed cache
         pcache = new_pcache(/*is_compressed=*/true);
         table_options.persistent_cache = pcache;
-        table_options.block_cache = NewLRUCache(uint64_max);
+        table_options.block_cache = NewLRUCache(size_max);
         table_options.block_cache_compressed = nullptr;
         options.table_factory.reset(NewBlockBasedTableFactory(table_options));
         break;
@@ -296,8 +339,8 @@ void PersistentCacheDBTest::RunTest(
         // page cache, block cache, compressed cache
         pcache = new_pcache(/*is_compressed=*/true);
         table_options.persistent_cache = pcache;
-        table_options.block_cache = NewLRUCache(uint64_max);
-        table_options.block_cache_compressed = NewLRUCache(uint64_max);
+        table_options.block_cache = NewLRUCache(size_max);
+        table_options.block_cache_compressed = NewLRUCache(size_max);
         options.table_factory.reset(NewBlockBasedTableFactory(table_options));
         break;
       case 2:
@@ -306,8 +349,8 @@ void PersistentCacheDBTest::RunTest(
         // also, make block cache sizes bigger, to trigger block cache hits
         pcache = new_pcache(/*is_compressed=*/true);
         table_options.persistent_cache = pcache;
-        table_options.block_cache = NewLRUCache(uint64_max);
-        table_options.block_cache_compressed = NewLRUCache(uint64_max);
+        table_options.block_cache = NewLRUCache(size_max);
+        table_options.block_cache_compressed = NewLRUCache(size_max);
         options.table_factory.reset(NewBlockBasedTableFactory(table_options));
         options.compression = kNoCompression;
         break;

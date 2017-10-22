@@ -1,12 +1,12 @@
 //  Copyright (c) 2011-present, Facebook, Inc.  All rights reserved.
-//  This source code is licensed under the BSD-style license found in the
-//  LICENSE file in the root directory of this source tree. An additional grant
-//  of patent rights can be found in the PATENTS file in the same directory.
+//  This source code is licensed under both the GPLv2 (found in the
+//  COPYING file in the root directory) and Apache 2.0 License
+//  (found in the LICENSE.Apache file in the root directory).
 
 #include "rocksdb/utilities/sim_cache.h"
 #include <atomic>
+#include "monitoring/statistics.h"
 #include "port/port.h"
-#include "util/statistics.h"
 
 namespace rocksdb {
 
@@ -64,7 +64,11 @@ class SimCacheImpl : public SimCache {
     return cache_->Lookup(key, stats);
   }
 
-  virtual void Release(Handle* handle) override { cache_->Release(handle); }
+  virtual bool Ref(Handle* handle) override { return cache_->Ref(handle); }
+
+  virtual bool Release(Handle* handle, bool force_erase = false) override {
+    return cache_->Release(handle, force_erase);
+  }
 
   virtual void Erase(const Slice& key) override {
     cache_->Erase(key);
@@ -136,12 +140,22 @@ class SimCacheImpl : public SimCache {
     std::string res;
     res.append("SimCache MISSes: " + std::to_string(get_miss_counter()) + "\n");
     res.append("SimCache HITs:    " + std::to_string(get_hit_counter()) + "\n");
-    char buff[100];
+    char buff[350];
     auto lookups = get_miss_counter() + get_hit_counter();
     snprintf(buff, sizeof(buff), "SimCache HITRATE: %.2f%%\n",
              (lookups == 0 ? 0 : get_hit_counter() * 100.0f / lookups));
     res.append(buff);
     return res;
+  }
+
+  virtual std::string GetPrintableOptions() const override {
+    std::string ret;
+    ret.reserve(20000);
+    ret.append("    cache_options:\n");
+    ret.append(cache_->GetPrintableOptions());
+    ret.append("    sim_cache_options:\n");
+    ret.append(key_only_cache_->GetPrintableOptions());
+    return ret;
   }
 
  private:

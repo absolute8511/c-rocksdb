@@ -1,7 +1,7 @@
 //  Copyright (c) 2011-present, Facebook, Inc.  All rights reserved.
-//  This source code is licensed under the BSD-style license found in the
-//  LICENSE file in the root directory of this source tree. An additional grant
-//  of patent rights can be found in the PATENTS file in the same directory.
+//  This source code is licensed under both the GPLv2 (found in the
+//  COPYING file in the root directory) and Apache 2.0 License
+//  (found in the LICENSE.Apache file in the root directory).
 //
 // Copyright (c) 2011 The LevelDB Authors. All rights reserved.
 // Use of this source code is governed by a BSD-style license that can be
@@ -34,14 +34,15 @@
 #include "db/dbformat.h"
 #include "db/file_indexer.h"
 #include "db/log_reader.h"
+#include "db/range_del_aggregator.h"
 #include "db/table_cache.h"
 #include "db/version_builder.h"
 #include "db/version_edit.h"
 #include "db/write_controller.h"
+#include "monitoring/instrumented_mutex.h"
+#include "options/db_options.h"
 #include "port/port.h"
 #include "rocksdb/env.h"
-#include "util/db_options.h"
-#include "util/instrumented_mutex.h"
 
 namespace rocksdb {
 
@@ -162,21 +163,41 @@ class VersionStorageInfo {
       bool expand_range = true)   // if set, returns files which overlap the
       const;                      // range and overlap each other. If false,
                                   // then just files intersecting the range
+  void GetCleanInputsWithinInterval(
+      int level, const InternalKey* begin,  // nullptr means before all keys
+      const InternalKey* end,               // nullptr means after all keys
+      std::vector<FileMetaData*>* inputs,
+      int hint_index = -1,        // index of overlap file
+      int* file_index = nullptr)  // return index of overlap file
+      const;
 
-  void GetOverlappingInputsBinarySearch(
-      int level,
+  void GetOverlappingInputsRangeBinarySearch(
+      int level,           // level > 0
       const Slice& begin,  // nullptr means before all keys
       const Slice& end,    // nullptr means after all keys
       std::vector<FileMetaData*>* inputs,
-      int hint_index,          // index of overlap file
-      int* file_index) const;  // return index of overlap file
+      int hint_index,                // index of overlap file
+      int* file_index,               // return index of overlap file
+      bool within_interval = false)  // if set, force the inputs within interval
+      const;
 
-  void ExtendOverlappingInputs(
+  void ExtendFileRangeOverlappingInterval(
       int level,
       const Slice& begin,  // nullptr means before all keys
       const Slice& end,    // nullptr means after all keys
-      std::vector<FileMetaData*>* inputs,
-      unsigned int index) const;  // start extending from this index
+      unsigned int index,  // start extending from this index
+      int* startIndex,     // return the startIndex of input range
+      int* endIndex)       // return the endIndex of input range
+      const;
+
+  void ExtendFileRangeWithinInterval(
+      int level,
+      const Slice& begin,  // nullptr means before all keys
+      const Slice& end,    // nullptr means after all keys
+      unsigned int index,  // start extending from this index
+      int* startIndex,     // return the startIndex of input range
+      int* endIndex)       // return the endIndex of input range
+      const;
 
   // Returns true iff some file in the specified level overlaps
   // some part of [*smallest_user_key,*largest_user_key].
@@ -433,11 +454,16 @@ class Version {
   // yield the contents of this Version when merged together.
   // REQUIRES: This version has been saved (see VersionSet::SaveTo)
   void AddIterators(const ReadOptions&, const EnvOptions& soptions,
-                    MergeIteratorBuilder* merger_iter_builder);
+                    MergeIteratorBuilder* merger_iter_builder,
+                    RangeDelAggregator* range_del_agg);
 
   void AddIteratorsForLevel(const ReadOptions&, const EnvOptions& soptions,
                             MergeIteratorBuilder* merger_iter_builder,
-                            int level);
+                            int level, RangeDelAggregator* range_del_agg);
+
+  void AddRangeDelIteratorsForLevel(
+      const ReadOptions& read_options, const EnvOptions& soptions, int level,
+      std::vector<InternalIterator*>* range_del_iters);
 
   // Lookup the value for key.  If found, store it in *val and
   // return OK.  Else return a non-OK status.
@@ -455,10 +481,10 @@ class Version {
   // for the key if a key was found.
   //
   // REQUIRES: lock is not held
-  void Get(const ReadOptions&, const LookupKey& key, std::string* val,
+  void Get(const ReadOptions&, const LookupKey& key, PinnableSlice* value,
            Status* status, MergeContext* merge_context,
-           bool* value_found = nullptr, bool* key_exists = nullptr,
-           SequenceNumber* seq = nullptr);
+           RangeDelAggregator* range_del_agg, bool* value_found = nullptr,
+           bool* key_exists = nullptr, SequenceNumber* seq = nullptr);
 
   // Loads some stats information from files. Call without mutex held. It needs
   // to be called before applying the version to the version set.
@@ -476,7 +502,7 @@ class Version {
   void AddLiveFiles(std::vector<FileDescriptor>* live);
 
   // Return a human readable string that describes this version's contents.
-  std::string DebugString(bool hex = false) const;
+  std::string DebugString(bool hex = false, bool print_stats = false) const;
 
   // Returns the version nuber of this version
   uint64_t GetVersionNumber() const { return version_number_; }
@@ -517,6 +543,8 @@ class Version {
   Version* TEST_Next() const {
     return next_;
   }
+
+  int TEST_refs() const { return refs_; }
 
   VersionStorageInfo* storage_info() { return &storage_info_; }
 
@@ -669,10 +697,29 @@ class VersionSet {
     return last_sequence_.load(std::memory_order_acquire);
   }
 
+  // Note: memory_order_acquire must be sufficient.
+  uint64_t LastToBeWrittenSequence() const {
+    return last_to_be_written_sequence_.load(std::memory_order_seq_cst);
+  }
+
   // Set the last sequence number to s.
   void SetLastSequence(uint64_t s) {
     assert(s >= last_sequence_);
+    // Last visible seqeunce must always be less than last written seq
+    assert(!db_options_->concurrent_prepare ||
+           s <= last_to_be_written_sequence_);
     last_sequence_.store(s, std::memory_order_release);
+  }
+
+  // Note: memory_order_release must be sufficient
+  void SetLastToBeWrittenSequence(uint64_t s) {
+    assert(s >= last_to_be_written_sequence_);
+    last_to_be_written_sequence_.store(s, std::memory_order_seq_cst);
+  }
+
+  // Note: memory_order_release must be sufficient
+  uint64_t FetchAddLastToBeWrittenSequence(uint64_t s) {
+    return last_to_be_written_sequence_.fetch_add(s, std::memory_order_seq_cst);
   }
 
   // Mark the specified file number as used.
@@ -774,7 +821,10 @@ class VersionSet {
   uint64_t manifest_file_number_;
   uint64_t options_file_number_;
   uint64_t pending_manifest_file_number_;
+  // The last seq visible to reads
   std::atomic<uint64_t> last_sequence_;
+  // The last seq with which a writer has written/will write.
+  std::atomic<uint64_t> last_to_be_written_sequence_;
   uint64_t prev_log_number_;  // 0 or backing store for memtable being compacted
 
   // Opened lazily

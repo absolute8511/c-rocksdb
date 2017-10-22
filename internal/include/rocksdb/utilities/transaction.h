@@ -1,7 +1,7 @@
 // Copyright (c) 2011-present, Facebook, Inc.  All rights reserved.
-// This source code is licensed under the BSD-style license found in the
-// LICENSE file in the root directory of this source tree. An additional grant
-// of patent rights can be found in the PATENTS file in the same directory.
+//  This source code is licensed under both the GPLv2 (found in the
+//  COPYING file in the root directory) and Apache 2.0 License
+//  (found in the LICENSE.Apache file in the root directory).
 
 #pragma once
 
@@ -209,10 +209,11 @@ class Transaction {
   // or other errors if this key could not be read.
   virtual Status GetForUpdate(const ReadOptions& options,
                               ColumnFamilyHandle* column_family,
-                              const Slice& key, std::string* value) = 0;
+                              const Slice& key, std::string* value,
+                              bool exclusive = true) = 0;
 
   virtual Status GetForUpdate(const ReadOptions& options, const Slice& key,
-                              std::string* value) = 0;
+                              std::string* value, bool exclusive = true) = 0;
 
   virtual std::vector<Status> MultiGetForUpdate(
       const ReadOptions& options,
@@ -399,10 +400,12 @@ class Transaction {
 
   virtual TransactionID GetID() const { return 0; }
 
-  virtual TransactionID GetWaitingTxn(uint32_t* column_family_id,
-                                      const std::string** key) const {
+  virtual bool IsDeadlockDetect() const { return false; }
+
+  virtual std::vector<TransactionID> GetWaitingTxns(uint32_t* column_family_id,
+                                                    std::string* key) const {
     assert(false);
-    return 0;
+    return std::vector<TransactionID>();
   }
 
   enum TransactionState {

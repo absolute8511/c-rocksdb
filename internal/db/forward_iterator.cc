@@ -1,7 +1,7 @@
 //  Copyright (c) 2011-present, Facebook, Inc.  All rights reserved.
-//  This source code is licensed under the BSD-style license found in the
-//  LICENSE file in the root directory of this source tree. An additional grant
-//  of patent rights can be found in the PATENTS file in the same directory.
+//  This source code is licensed under both the GPLv2 (found in the
+//  COPYING file in the root directory) and Apache 2.0 License
+//  (found in the LICENSE.Apache file in the root directory).
 
 #ifndef ROCKSDB_LITE
 #include "db/forward_iterator.h"
@@ -18,7 +18,7 @@
 #include "rocksdb/env.h"
 #include "rocksdb/slice.h"
 #include "rocksdb/slice_transform.h"
-#include "table/merger.h"
+#include "table/merging_iterator.h"
 #include "util/string_util.h"
 #include "util/sync_point.h"
 
@@ -69,12 +69,19 @@ class LevelIterator : public InternalIterator {
       delete file_iter_;
     }
 
+    RangeDelAggregator range_del_agg(
+        cfd_->internal_comparator(), {} /* snapshots */);
     file_iter_ = cfd_->table_cache()->NewIterator(
         read_options_, *(cfd_->soptions()), cfd_->internal_comparator(),
-        files_[file_index_]->fd, nullptr /* table_reader_ptr */, nullptr,
-        false);
-
+        files_[file_index_]->fd,
+        read_options_.ignore_range_deletions ? nullptr : &range_del_agg,
+        nullptr /* table_reader_ptr */, nullptr, false);
     file_iter_->SetPinnedItersMgr(pinned_iters_mgr_);
+    if (!range_del_agg.IsEmpty()) {
+      status_ = Status::NotSupported(
+          "Range tombstones unsupported with ForwardIterator");
+      valid_ = false;
+    }
   }
   void SeekToLast() override {
     status_ = Status::NotSupported("LevelIterator::SeekToLast()");
@@ -304,7 +311,7 @@ void ForwardIterator::SeekInternal(const Slice& internal_key,
             seek_to_first ||
             // prev_key_ > internal_key
             cfd_->internal_comparator().InternalKeyComparator::Compare(
-                prev_key_.GetKey(), internal_key) > 0)) {
+                prev_key_.GetInternalKey(), internal_key) > 0)) {
       // Some iterators are trimmed. Need to rebuild.
       RebuildIterators(true);
       // Already seeked mutable iter, so seek again
@@ -365,61 +372,19 @@ void ForwardIterator::SeekInternal(const Slice& internal_key,
       }
     }
 
-    int32_t search_left_bound = 0;
-    int32_t search_right_bound = FileIndexer::kLevelMaxIndex;
     for (int32_t level = 1; level < vstorage->num_levels(); ++level) {
       const std::vector<FileMetaData*>& level_files =
           vstorage->LevelFiles(level);
       if (level_files.empty()) {
-        search_left_bound = 0;
-        search_right_bound = FileIndexer::kLevelMaxIndex;
         continue;
       }
       if (level_iters_[level - 1] == nullptr) {
         continue;
       }
       uint32_t f_idx = 0;
-      const auto& indexer = vstorage->file_indexer();
       if (!seek_to_first) {
-        if (search_left_bound == search_right_bound) {
-          f_idx = search_left_bound;
-        } else if (search_left_bound < search_right_bound) {
-          f_idx =
-              FindFileInRange(level_files, internal_key, search_left_bound,
-                              search_right_bound == FileIndexer::kLevelMaxIndex
-                                  ? static_cast<uint32_t>(level_files.size())
-                                  : search_right_bound);
-        } else {
-          // search_left_bound > search_right_bound
-          // There are only 2 cases this can happen:
-          // (1) target key is smaller than left most file
-          // (2) target key is larger than right most file
-          assert(search_left_bound == (int32_t)level_files.size() ||
-                 search_right_bound == -1);
-          if (search_right_bound == -1) {
-            assert(search_left_bound == 0);
-            f_idx = 0;
-          } else {
-            indexer.GetNextLevelIndex(
-                level, level_files.size() - 1,
-                1, 1, &search_left_bound, &search_right_bound);
-            continue;
-          }
-        }
-
-        // Prepare hints for the next level
-        if (f_idx < level_files.size()) {
-          int cmp_smallest = user_comparator_->Compare(
-              user_key, level_files[f_idx]->smallest.user_key());
-          assert(user_comparator_->Compare(
-                     user_key, level_files[f_idx]->largest.user_key()) <= 0);
-          indexer.GetNextLevelIndex(level, f_idx, cmp_smallest, -1,
-                                    &search_left_bound, &search_right_bound);
-        } else {
-          indexer.GetNextLevelIndex(
-              level, level_files.size() - 1,
-              1, 1, &search_left_bound, &search_right_bound);
-        }
+        f_idx = FindFileInRange(level_files, internal_key, 0,
+                                static_cast<uint32_t>(level_files.size()));
       }
 
       // Seek
@@ -446,7 +411,7 @@ void ForwardIterator::SeekInternal(const Slice& internal_key,
     if (seek_to_first) {
       is_prev_set_ = false;
     } else {
-      prev_key_.SetKey(internal_key);
+      prev_key_.SetInternalKey(internal_key);
       is_prev_set_ = true;
       is_prev_inclusive_ = true;
     }
@@ -485,15 +450,15 @@ void ForwardIterator::Next() {
     if (is_prev_set_ && prefix_extractor_) {
       // advance prev_key_ to current_ only if they share the same prefix
       update_prev_key =
-        prefix_extractor_->Transform(prev_key_.GetKey()).compare(
-          prefix_extractor_->Transform(current_->key())) == 0;
+          prefix_extractor_->Transform(prev_key_.GetUserKey())
+              .compare(prefix_extractor_->Transform(current_->key())) == 0;
     } else {
       update_prev_key = true;
     }
 
 
     if (update_prev_key) {
-      prev_key_.SetKey(current_->key());
+      prev_key_.SetInternalKey(current_->key());
       is_prev_set_ = true;
       is_prev_inclusive_ = false;
     }
@@ -512,7 +477,7 @@ void ForwardIterator::Next() {
         current_ = nullptr;
       }
       if (update_prev_key) {
-        mutable_iter_->Seek(prev_key_.GetKey());
+        mutable_iter_->Seek(prev_key_.GetInternalKey());
       }
     }
   }
@@ -600,8 +565,17 @@ void ForwardIterator::RebuildIterators(bool refresh_sv) {
     // New
     sv_ = cfd_->GetReferencedSuperVersion(&(db_->mutex_));
   }
+  RangeDelAggregator range_del_agg(
+      InternalKeyComparator(cfd_->internal_comparator()), {} /* snapshots */);
   mutable_iter_ = sv_->mem->NewIterator(read_options_, &arena_);
   sv_->imm->AddIterators(read_options_, &imm_iters_, &arena_);
+  if (!read_options_.ignore_range_deletions) {
+    std::unique_ptr<InternalIterator> range_del_iter(
+        sv_->mem->NewRangeTombstoneIterator(read_options_));
+    range_del_agg.AddTombstones(std::move(range_del_iter));
+    sv_->imm->AddRangeTombstoneIterators(read_options_, &arena_,
+                                         &range_del_agg);
+  }
   has_iter_trimmed_for_upper_bound_ = false;
 
   const auto* vstorage = sv_->current->storage_info();
@@ -616,13 +590,19 @@ void ForwardIterator::RebuildIterators(bool refresh_sv) {
       continue;
     }
     l0_iters_.push_back(cfd_->table_cache()->NewIterator(
-        read_options_, *cfd_->soptions(), cfd_->internal_comparator(), l0->fd));
+        read_options_, *cfd_->soptions(), cfd_->internal_comparator(), l0->fd,
+        read_options_.ignore_range_deletions ? nullptr : &range_del_agg));
   }
   BuildLevelIterators(vstorage);
   current_ = nullptr;
   is_prev_set_ = false;
 
   UpdateChildrenPinnedItersMgr();
+  if (!range_del_agg.IsEmpty()) {
+    status_ = Status::NotSupported(
+        "Range tombstones unsupported with ForwardIterator");
+    valid_ = false;
+  }
 }
 
 void ForwardIterator::RenewIterators() {
@@ -640,6 +620,15 @@ void ForwardIterator::RenewIterators() {
 
   mutable_iter_ = svnew->mem->NewIterator(read_options_, &arena_);
   svnew->imm->AddIterators(read_options_, &imm_iters_, &arena_);
+  RangeDelAggregator range_del_agg(
+      InternalKeyComparator(cfd_->internal_comparator()), {} /* snapshots */);
+  if (!read_options_.ignore_range_deletions) {
+    std::unique_ptr<InternalIterator> range_del_iter(
+        svnew->mem->NewRangeTombstoneIterator(read_options_));
+    range_del_agg.AddTombstones(std::move(range_del_iter));
+    sv_->imm->AddRangeTombstoneIterators(read_options_, &arena_,
+                                         &range_del_agg);
+  }
 
   const auto* vstorage = sv_->current->storage_info();
   const auto& l0_files = vstorage->LevelFiles(0);
@@ -671,7 +660,8 @@ void ForwardIterator::RenewIterators() {
     }
     l0_iters_new.push_back(cfd_->table_cache()->NewIterator(
         read_options_, *cfd_->soptions(), cfd_->internal_comparator(),
-        l0_files_new[inew]->fd));
+        l0_files_new[inew]->fd,
+        read_options_.ignore_range_deletions ? nullptr : &range_del_agg));
   }
 
   for (auto* f : l0_iters_) {
@@ -691,6 +681,11 @@ void ForwardIterator::RenewIterators() {
   sv_ = svnew;
 
   UpdateChildrenPinnedItersMgr();
+  if (!range_del_agg.IsEmpty()) {
+    status_ = Status::NotSupported(
+        "Range tombstones unsupported with ForwardIterator");
+    valid_ = false;
+  }
 }
 
 void ForwardIterator::BuildLevelIterators(const VersionStorageInfo* vstorage) {
@@ -723,7 +718,7 @@ void ForwardIterator::ResetIncompleteIterators() {
     DeleteIterator(l0_iters_[i]);
     l0_iters_[i] = cfd_->table_cache()->NewIterator(
         read_options_, *cfd_->soptions(), cfd_->internal_comparator(),
-        l0_files[i]->fd);
+        l0_files[i]->fd, nullptr /* range_del_agg */);
     l0_iters_[i]->SetPinnedItersMgr(pinned_iters_mgr_);
   }
 
@@ -782,7 +777,7 @@ bool ForwardIterator::NeedToSeekImmutable(const Slice& target) {
   if (!valid_ || !current_ || !is_prev_set_ || !immutable_status_.ok()) {
     return true;
   }
-  Slice prev_key = prev_key_.GetKey();
+  Slice prev_key = prev_key_.GetInternalKey();
   if (prefix_extractor_ && prefix_extractor_->Transform(target).compare(
     prefix_extractor_->Transform(prev_key)) != 0) {
     return true;

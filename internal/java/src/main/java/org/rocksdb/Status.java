@@ -1,7 +1,7 @@
 // Copyright (c) 2011-present, Facebook, Inc.  All rights reserved.
-// This source code is licensed under the BSD-style license found in the
-// LICENSE file in the root directory of this source tree. An additional grant
-// of patent rights can be found in the PATENTS file in the same directory.
+//  This source code is licensed under both the GPLv2 (found in the
+//  COPYING file in the root directory) and Apache 2.0 License
+//  (found in the LICENSE.Apache file in the root directory).
 
 package org.rocksdb;
 
@@ -92,7 +92,7 @@ public class Status {
     MutexTimeout( (byte)0x1),
     LockTimeout(  (byte)0x2),
     LockLimit(    (byte)0x3),
-    MaxSubCode(   (byte)0xFE);
+    MaxSubCode(   (byte)0x7E);
 
     private final byte value;
 

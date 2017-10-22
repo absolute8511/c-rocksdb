@@ -1,13 +1,16 @@
 //  Copyright (c) 2013, Facebook, Inc.  All rights reserved.
-//  This source code is licensed under the BSD-style license found in the
-//  LICENSE file in the root directory of this source tree. An additional grant
-//  of patent rights can be found in the PATENTS file in the same directory.
+//  This source code is licensed under both the GPLv2 (found in the
+//  COPYING file in the root directory) and Apache 2.0 License
+//  (found in the LICENSE.Apache file in the root directory).
 #pragma once
+
+#ifndef ROCKSDB_LITE
 
 #ifndef  OS_WIN
 #include <unistd.h>
 #endif // ! OS_WIN
 
+#include <atomic>
 #include <list>
 #include <memory>
 #include <set>
@@ -24,12 +27,12 @@
 #include "utilities/persistent_cache/block_cache_tier_metadata.h"
 #include "utilities/persistent_cache/persistent_cache_util.h"
 
-#include "db/skiplist.h"
+#include "memtable/skiplist.h"
+#include "monitoring/histogram.h"
 #include "port/port.h"
 #include "util/arena.h"
 #include "util/coding.h"
 #include "util/crc32c.h"
-#include "util/histogram.h"
 #include "util/mutexlock.h"
 
 namespace rocksdb {
@@ -64,7 +67,9 @@ class BlockCacheTier : public PersistentCacheTier {
 
   bool IsCompressed() override { return opt_.is_compressed; }
 
-  std::string PrintStats() override;
+  std::string GetPrintableOptions() const override { return opt_.ToString(); }
+
+  PersistentCache::StatsType Stats() override;
 
   void TEST_Flush() override {
     while (insert_ops_.Size()) {
@@ -103,24 +108,24 @@ class BlockCacheTier : public PersistentCacheTier {
   // insert implementation
   Status InsertImpl(const Slice& key, const Slice& data);
   // Create a new cache file
-  void NewCacheFile();
+  Status NewCacheFile();
   // Get cache directory path
   std::string GetCachePath() const { return opt_.path + "/cache"; }
   // Cleanup folder
   Status CleanupCacheFolder(const std::string& folder);
 
   // Statistics
-  struct Stats {
+  struct Statistics {
     HistogramImpl bytes_pipelined_;
     HistogramImpl bytes_written_;
     HistogramImpl bytes_read_;
     HistogramImpl read_hit_latency_;
     HistogramImpl read_miss_latency_;
     HistogramImpl write_latency_;
-    uint64_t cache_hits_ = 0;
-    uint64_t cache_misses_ = 0;
-    uint64_t cache_errors_ = 0;
-    uint64_t insert_dropped_ = 0;
+    std::atomic<uint64_t> cache_hits_{0};
+    std::atomic<uint64_t> cache_misses_{0};
+    std::atomic<uint64_t> cache_errors_{0};
+    std::atomic<uint64_t> insert_dropped_{0};
 
     double CacheHitPct() const {
       const auto lookups = cache_hits_ + cache_misses_;
@@ -136,14 +141,16 @@ class BlockCacheTier : public PersistentCacheTier {
   port::RWMutex lock_;                          // Synchronization
   const PersistentCacheConfig opt_;             // BlockCache options
   BoundedQueue<InsertOp> insert_ops_;           // Ops waiting for insert
-  std::thread insert_th_;                       // Insert thread
+  rocksdb::port::Thread insert_th_;                       // Insert thread
   uint32_t writer_cache_id_ = 0;                // Current cache file identifier
   WriteableCacheFile* cache_file_ = nullptr;    // Current cache file reference
   CacheWriteBufferAllocator buffer_allocator_;  // Buffer provider
   ThreadedWriter writer_;                       // Writer threads
   BlockCacheTierMetadata metadata_;             // Cache meta data manager
   std::atomic<uint64_t> size_{0};               // Size of the cache
-  Stats stats_;                                 // Statistics
+  Statistics stats_;                                 // Statistics
 };
 
 }  // namespace rocksdb
+
+#endif

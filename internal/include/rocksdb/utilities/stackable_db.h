@@ -3,6 +3,7 @@
 // found in the LICENSE file. See the AUTHORS file for names of contributors.
 
 #pragma once
+#include <map>
 #include <string>
 #include "rocksdb/db.h"
 
@@ -36,8 +37,26 @@ class StackableDB : public DB {
     return db_->CreateColumnFamily(options, column_family_name, handle);
   }
 
+  virtual Status CreateColumnFamilies(
+      const ColumnFamilyOptions& options,
+      const std::vector<std::string>& column_family_names,
+      std::vector<ColumnFamilyHandle*>* handles) override {
+    return db_->CreateColumnFamilies(options, column_family_names, handles);
+  }
+
+  virtual Status CreateColumnFamilies(
+      const std::vector<ColumnFamilyDescriptor>& column_families,
+      std::vector<ColumnFamilyHandle*>* handles) override {
+    return db_->CreateColumnFamilies(column_families, handles);
+  }
+
   virtual Status DropColumnFamily(ColumnFamilyHandle* column_family) override {
     return db_->DropColumnFamily(column_family);
+  }
+
+  virtual Status DropColumnFamilies(
+      const std::vector<ColumnFamilyHandle*>& column_families) override {
+    return db_->DropColumnFamilies(column_families);
   }
 
   virtual Status DestroyColumnFamilyHandle(
@@ -55,7 +74,7 @@ class StackableDB : public DB {
   using DB::Get;
   virtual Status Get(const ReadOptions& options,
                      ColumnFamilyHandle* column_family, const Slice& key,
-                     std::string* value) override {
+                     PinnableSlice* value) override {
     return db_->Get(options, column_family, key, value);
   }
 
@@ -133,10 +152,16 @@ class StackableDB : public DB {
     return db_->ReleaseSnapshot(snapshot);
   }
 
+  using DB::GetMapProperty;
   using DB::GetProperty;
   virtual bool GetProperty(ColumnFamilyHandle* column_family,
                            const Slice& property, std::string* value) override {
     return db_->GetProperty(column_family, property, value);
+  }
+  virtual bool GetMapProperty(ColumnFamilyHandle* column_family,
+                              const Slice& property,
+                              std::map<std::string, double>* value) override {
+    return db_->GetMapProperty(column_family, property, value);
   }
 
   using DB::GetIntProperty;
@@ -154,9 +179,18 @@ class StackableDB : public DB {
   using DB::GetApproximateSizes;
   virtual void GetApproximateSizes(ColumnFamilyHandle* column_family,
                                    const Range* r, int n, uint64_t* sizes,
-                                   bool include_memtable = false) override {
+                                   uint8_t include_flags
+                                   = INCLUDE_FILES) override {
     return db_->GetApproximateSizes(column_family, r, n, sizes,
-                                    include_memtable);
+                                    include_flags);
+  }
+
+  using DB::GetApproximateMemTableStats;
+  virtual void GetApproximateMemTableStats(ColumnFamilyHandle* column_family,
+                                           const Range& range,
+                                           uint64_t* const count,
+                                           uint64_t* const size) override {
+    return db_->GetApproximateMemTableStats(column_family, range, count, size);
   }
 
   using DB::CompactRange;
@@ -234,9 +268,7 @@ class StackableDB : public DB {
     return db_->SyncWAL();
   }
 
-  virtual Logger* GetInfoLogger() const override {
-      return db_->GetInfoLogger();
-  }
+  virtual Status FlushWAL(bool sync) override { return db_->FlushWAL(sync); }
 
 #ifndef ROCKSDB_LITE
 
@@ -294,6 +326,9 @@ class StackableDB : public DB {
       override {
     return db_->SetDBOptions(new_options);
   }
+
+  using DB::ResetStats;
+  virtual Status ResetStats() override { return db_->ResetStats(); }
 
   using DB::GetPropertiesOfAllTables;
   virtual Status GetPropertiesOfAllTables(

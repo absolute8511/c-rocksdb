@@ -1,7 +1,7 @@
 //  Copyright (c) 2013, Facebook, Inc.  All rights reserved.
-//  This source code is licensed under the BSD-style license found in the
-//  LICENSE file in the root directory of this source tree. An additional grant
-//  of patent rights can be found in the PATENTS file in the same directory.
+//  This source code is licensed under both the GPLv2 (found in the
+//  COPYING file in the root directory) and Apache 2.0 License
+//  (found in the LICENSE.Apache file in the root directory).
 #ifndef ROCKSDB_LITE
 
 #include "utilities/persistent_cache/block_cache_tier.h"
@@ -10,7 +10,10 @@
 #include <utility>
 #include <vector>
 
+#include "port/port.h"
+#include "util/logging.h"
 #include "util/stop_watch.h"
+#include "util/sync_point.h"
 #include "utilities/persistent_cache/block_cache_tier_file.h"
 
 namespace rocksdb {
@@ -44,7 +47,7 @@ Status BlockCacheTier::Open() {
   // Create base/<cache dir> directory
   status = opt_.env->CreateDir(GetCachePath());
   if (!status.ok()) {
-    // directory already exisits, clean it up
+    // directory already exists, clean it up
     status = CleanupCacheFolder(GetCachePath());
     assert(status.ok());
     if (!status.ok()) {
@@ -54,13 +57,20 @@ Status BlockCacheTier::Open() {
     }
   }
 
+  // create a new file
   assert(!cache_file_);
-  NewCacheFile();
+  status = NewCacheFile();
+  if (!status.ok()) {
+    Error(opt_.log, "Error creating new file %s. %s", opt_.path.c_str(),
+          status.ToString().c_str());
+    return status;
+  }
+
   assert(cache_file_);
 
   if (opt_.pipeline_writes) {
     assert(!insert_th_.joinable());
-    insert_th_ = std::thread(&BlockCacheTier::InsertMain, this);
+    insert_th_ = port::Thread(&BlockCacheTier::InsertMain, this);
   }
 
   return Status::OK();
@@ -100,7 +110,7 @@ Status BlockCacheTier::CleanupCacheFolder(const std::string& folder) {
         return status;
       }
     } else {
-      Debug(opt_.log, "Skipping file %s", file.c_str());
+      ROCKS_LOG_DEBUG(opt_.log, "Skipping file %s", file.c_str());
     }
   }
   return Status::OK();
@@ -123,34 +133,42 @@ Status BlockCacheTier::Close() {
   return Status::OK();
 }
 
-std::string BlockCacheTier::PrintStats() {
-  std::ostringstream os;
-  os << "persistentcache.blockcachetier.bytes_piplined: "
-     << stats_.bytes_pipelined_.ToString() << std::endl
-     << "persistentcache.blockcachetier.bytes_written: "
-     << stats_.bytes_written_.ToString() << std::endl
-     << "persistentcache.blockcachetier.bytes_read: "
-     << stats_.bytes_read_.ToString() << std::endl
-     << "persistentcache.blockcachetier.insert_dropped"
-     << stats_.insert_dropped_ << std::endl
-     << "persistentcache.blockcachetier.cache_hits: " << stats_.cache_hits_
-     << std::endl
-     << "persistentcache.blockcachetier.cache_misses: " << stats_.cache_misses_
-     << std::endl
-     << "persistentcache.blockcachetier.cache_errors: " << stats_.cache_errors_
-     << std::endl
-     << "persistentcache.blockcachetier.cache_hits_pct: "
-     << stats_.CacheHitPct() << std::endl
-     << "persistentcache.blockcachetier.cache_misses_pct: "
-     << stats_.CacheMissPct() << std::endl
-     << "persistentcache.blockcachetier.read_hit_latency: "
-     << stats_.read_hit_latency_.ToString() << std::endl
-     << "persistentcache.blockcachetier.read_miss_latency: "
-     << stats_.read_miss_latency_.ToString() << std::endl
-     << "persistenetcache.blockcachetier.write_latency: "
-     << stats_.write_latency_.ToString() << std::endl
-     << PersistentCacheTier::PrintStats();
-  return os.str();
+template<class T>
+void Add(std::map<std::string, double>* stats, const std::string& key,
+         const T& t) {
+  stats->insert({key, static_cast<const double>(t)});
+}
+
+PersistentCache::StatsType BlockCacheTier::Stats() {
+  std::map<std::string, double> stats;
+  Add(&stats, "persistentcache.blockcachetier.bytes_piplined",
+      stats_.bytes_pipelined_.Average());
+  Add(&stats, "persistentcache.blockcachetier.bytes_written",
+      stats_.bytes_written_.Average());
+  Add(&stats, "persistentcache.blockcachetier.bytes_read",
+      stats_.bytes_read_.Average());
+  Add(&stats, "persistentcache.blockcachetier.insert_dropped",
+      stats_.insert_dropped_);
+  Add(&stats, "persistentcache.blockcachetier.cache_hits",
+      stats_.cache_hits_);
+  Add(&stats, "persistentcache.blockcachetier.cache_misses",
+      stats_.cache_misses_);
+  Add(&stats, "persistentcache.blockcachetier.cache_errors",
+      stats_.cache_errors_);
+  Add(&stats, "persistentcache.blockcachetier.cache_hits_pct",
+      stats_.CacheHitPct());
+  Add(&stats, "persistentcache.blockcachetier.cache_misses_pct",
+      stats_.CacheMissPct());
+  Add(&stats, "persistentcache.blockcachetier.read_hit_latency",
+      stats_.read_hit_latency_.Average());
+  Add(&stats, "persistentcache.blockcachetier.read_miss_latency",
+      stats_.read_miss_latency_.Average());
+  Add(&stats, "persistenetcache.blockcachetier.write_latency",
+      stats_.write_latency_.Average());
+
+  auto out = PersistentCacheTier::Stats();
+  out.push_back(stats);
+  return out;
 }
 
 Status BlockCacheTier::Insert(const Slice& key, const char* data,
@@ -204,26 +222,29 @@ Status BlockCacheTier::InsertImpl(const Slice& key, const Slice& data) {
   assert(data.size());
   assert(cache_file_);
 
-  StopWatchNano timer(opt_.env);
+  StopWatchNano timer(opt_.env, /*auto_start=*/ true);
 
   WriteLock _(&lock_);
 
   LBA lba;
   if (metadata_.Lookup(key, &lba)) {
-    // the key already exisits, this is duplicate insert
+    // the key already exists, this is duplicate insert
     return Status::OK();
   }
 
   while (!cache_file_->Append(key, data, &lba)) {
     if (!cache_file_->Eof()) {
-      Debug(opt_.log, "Error inserting to cache file %d",
-            cache_file_->cacheid());
+      ROCKS_LOG_DEBUG(opt_.log, "Error inserting to cache file %d",
+                      cache_file_->cacheid());
       stats_.write_latency_.Add(timer.ElapsedNanos() / 1000);
       return Status::TryAgain();
     }
 
     assert(cache_file_->Eof());
-    NewCacheFile();
+    Status status = NewCacheFile();
+    if (!status.ok()) {
+      return status;
+    }
   }
 
   // Insert into lookup index
@@ -244,7 +265,7 @@ Status BlockCacheTier::InsertImpl(const Slice& key, const Slice& data) {
 
 Status BlockCacheTier::Lookup(const Slice& key, unique_ptr<char[]>* val,
                               size_t* size) {
-  StopWatchNano timer(opt_.env);
+  StopWatchNano timer(opt_.env, /*auto_start=*/ true);
 
   LBA lba;
   bool status;
@@ -272,7 +293,6 @@ Status BlockCacheTier::Lookup(const Slice& key, unique_ptr<char[]>* val,
 
   status = file->Read(lba, &blk_key, &blk_val, scratch.get());
   --file->refs_;
-  assert(status);
   if (!status) {
     stats_.cache_misses_++;
     stats_.cache_errors_++;
@@ -301,25 +321,36 @@ bool BlockCacheTier::Erase(const Slice& key) {
   return true;
 }
 
-void BlockCacheTier::NewCacheFile() {
+Status BlockCacheTier::NewCacheFile() {
   lock_.AssertHeld();
 
-  Info(opt_.log, "Creating cache file %d", writer_cache_id_);
+  TEST_SYNC_POINT_CALLBACK("BlockCacheTier::NewCacheFile:DeleteDir",
+                           (void*)(GetCachePath().c_str()));
+
+  std::unique_ptr<WriteableCacheFile> f(
+    new WriteableCacheFile(opt_.env, &buffer_allocator_, &writer_,
+                           GetCachePath(), writer_cache_id_,
+                           opt_.cache_file_size, opt_.log));
+
+  bool status = f->Create(opt_.enable_direct_writes, opt_.enable_direct_reads);
+  if (!status) {
+    return Status::IOError("Error creating file");
+  }
+
+  Info(opt_.log, "Created cache file %d", writer_cache_id_);
 
   writer_cache_id_++;
-
-  cache_file_ = new WriteableCacheFile(opt_.env, &buffer_allocator_, &writer_,
-                                       GetCachePath(), writer_cache_id_,
-                                       opt_.cache_file_size, opt_.log);
-  bool status;
-  status =
-      cache_file_->Create(opt_.enable_direct_writes, opt_.enable_direct_reads);
-  assert(status);
+  cache_file_ = f.release();
 
   // insert to cache files tree
   status = metadata_.Insert(cache_file_);
-  (void)status;
   assert(status);
+  if (!status) {
+    Error(opt_.log, "Error inserting to metadata");
+    return Status::IOError("Error inserting to metadata");
+  }
+
+  return Status::OK();
 }
 
 bool BlockCacheTier::Reserve(const size_t size) {

@@ -1,7 +1,7 @@
 //  Copyright (c) 2011-present, Facebook, Inc.  All rights reserved.
-//  This source code is licensed under the BSD-style license found in the
-//  LICENSE file in the root directory of this source tree. An additional grant
-//  of patent rights can be found in the PATENTS file in the same directory.
+//  This source code is licensed under both the GPLv2 (found in the
+//  COPYING file in the root directory) and Apache 2.0 License
+//  (found in the LICENSE.Apache file in the root directory).
 
 #ifndef ROCKSDB_LITE
 
@@ -40,7 +40,6 @@ TransactionImpl::TransactionImpl(TransactionDB* txn_db,
     : TransactionBaseImpl(txn_db->GetRootDB(), write_options),
       txn_db_impl_(nullptr),
       txn_id_(0),
-      waiting_txn_id_(0),
       waiting_cf_id_(0),
       waiting_key_(nullptr),
       expiration_time_(0),
@@ -61,6 +60,7 @@ void TransactionImpl::Initialize(const TransactionOptions& txn_options) {
 
   deadlock_detect_ = txn_options.deadlock_detect;
   deadlock_detect_depth_ = txn_options.deadlock_detect_depth;
+  write_batch_.SetMaxBytes(txn_options.max_write_batch_size);
 
   lock_timeout_ = txn_options.lock_timeout * 1000;
   if (lock_timeout_ < 0) {
@@ -272,6 +272,8 @@ Status TransactionImpl::Commit() {
     s = db_impl_->WriteImpl(write_options_, working_batch, nullptr, nullptr,
                             log_number_);
     if (!s.ok()) {
+      ROCKS_LOG_WARN(db_impl_->immutable_db_options().info_log,
+                     "Commit write failed");
       return s;
     }
 
@@ -395,12 +397,12 @@ Status TransactionImpl::LockBatch(WriteBatch* batch,
     for (const auto& key_iter : cfh_keys) {
       const std::string& key = key_iter;
 
-      s = txn_db_impl_->TryLock(this, cfh_id, key);
+      s = txn_db_impl_->TryLock(this, cfh_id, key, true /* exclusive */);
       if (!s.ok()) {
         break;
       }
       TrackKey(keys_to_unlock, cfh_id, std::move(key), kMaxSequenceNumber,
-               false);
+               false, true /* exclusive */);
     }
 
     if (!s.ok()) {
@@ -422,10 +424,11 @@ Status TransactionImpl::LockBatch(WriteBatch* batch,
 // the snapshot time.
 Status TransactionImpl::TryLock(ColumnFamilyHandle* column_family,
                                 const Slice& key, bool read_only,
-                                bool untracked) {
+                                bool exclusive, bool untracked) {
   uint32_t cfh_id = GetColumnFamilyID(column_family);
   std::string key_str = key.ToString();
   bool previously_locked;
+  bool lock_upgrade = false;
   Status s;
 
   // lock this key if this transactions hasn't already locked it
@@ -441,14 +444,18 @@ Status TransactionImpl::TryLock(ColumnFamilyHandle* column_family,
     if (iter == tracked_keys_cf->second.end()) {
       previously_locked = false;
     } else {
+      if (!iter->second.exclusive && exclusive) {
+        lock_upgrade = true;
+      }
       previously_locked = true;
       current_seqno = iter->second.seq;
     }
   }
 
-  // lock this key if this transactions hasn't already locked it
-  if (!previously_locked) {
-    s = txn_db_impl_->TryLock(this, cfh_id, key_str);
+  // Lock this key if this transactions hasn't already locked it or we require
+  // an upgrade.
+  if (!previously_locked || lock_upgrade) {
+    s = txn_db_impl_->TryLock(this, cfh_id, key_str, exclusive);
   }
 
   SetSnapshotIfNeeded();
@@ -481,7 +488,13 @@ Status TransactionImpl::TryLock(ColumnFamilyHandle* column_family,
         // Failed to validate key
         if (!previously_locked) {
           // Unlock key we just locked
-          txn_db_impl_->UnLock(this, cfh_id, key.ToString());
+          if (lock_upgrade) {
+            s = txn_db_impl_->TryLock(this, cfh_id, key_str,
+                                      false /* exclusive */);
+            assert(s.ok());
+          } else {
+            txn_db_impl_->UnLock(this, cfh_id, key.ToString());
+          }
         }
       }
     }
@@ -489,7 +502,7 @@ Status TransactionImpl::TryLock(ColumnFamilyHandle* column_family,
 
   if (s.ok()) {
     // Let base class know we've conflict checked this key.
-    TrackKey(cfh_id, key_str, new_seqno, read_only);
+    TrackKey(cfh_id, key_str, new_seqno, read_only, exclusive);
   }
 
   return s;
